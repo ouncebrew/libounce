@@ -9,7 +9,7 @@
 enum {
     Initialize = 2, Finalize = 3, StartGuest = 4, CloseSession = 5,
     GetConnectionEvent = 7, GetConnectionState = 8, SetPadStyles = 25,
-    SetJoyHoldType = 27, SetHidFeatures = 160, StartStreaming = 500,
+    SetJoyHoldType = 27, SetTouchRange = 120, SetHidFeatures = 160, StartStreaming = 500,
     GetGuestCapacity = 501, GetStreamType = 502, GetStreamingMode = 503,
     ReleaseGuestBuffers = 507, EndMatchmake = 509, SetAudio = 510,
     // A nonzero libounce trace token selects CMIF v1 / RequestWithContext.
@@ -107,6 +107,17 @@ Result gameshareLocalHostPrepare(GameShareLocalHost *host, u8 max_guests, const 
     rc = serviceDispatchIn(shim, SetHidFeatures, features, .context = TraceContext);
     if (R_SUCCEEDED(rc)) host->state = GameShareHostPrepared;
     return rc;
+}
+
+Result gameshareLocalHostEnableSensors(GameShareLocalHost *host, s32 width, s32 height) {
+    if (!host || host->state != GameShareHostPrepared || width <= 0 || height <= 0) return badInput();
+    const u32 features = 0x0f;
+    const struct { s32 width, height; } range = {width, height};
+    host->operation = "enable guest sensors";
+    Result rc = serviceDispatchIn(&host->client.shim, SetHidFeatures, features, .context = TraceContext);
+    if (R_FAILED(rc)) return rc;
+    host->operation = "set guest touch range";
+    return serviceDispatchIn(&host->client.shim, SetTouchRange, range, .context = TraceContext);
 }
 
 Result gameshareLocalHostMatchmake(GameShareLocalHost *host, AccountUid uid) {

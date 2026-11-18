@@ -99,6 +99,24 @@ typedef struct {
 Result gameshareLocalReadGuestPad(const GameShareLocalClient *client, u8 guest_index,
                                   HidNpadIdType pad_id, GameShareLocalPad *out);
 
+typedef enum {
+    GameShareLocalSensor_FullKey,
+    GameShareLocalSensor_Handheld,
+    GameShareLocalSensor_JoyDualLeft,
+    GameShareLocalSensor_JoyDualRight,
+    GameShareLocalSensor_JoyLeft,
+    GameShareLocalSensor_JoyRight,
+} GameShareLocalSensor;
+
+// Call after prepare and before matchmaking. Touch positions use the supplied dimensions.
+Result gameshareLocalHostEnableSensors(GameShareLocalHost *host, s32 width, s32 height);
+
+// Reads the latest sample for guest_index (0–2). An empty ring returns a zeroed
+// state. If the writer is busy, poll again on LibnxError_Timeout.
+Result gameshareLocalReadGuestTouch(const GameShareLocalClient *client, u8 guest_index, HidTouchScreenState *out);
+Result gameshareLocalReadGuestSixAxis(const GameShareLocalClient *client, u8 guest_index, HidNpadIdType pad_id,
+                                      GameShareLocalSensor sensor, HidSixAxisSensorState *out);
+
 #ifdef __cplusplus
 }
 #endif
