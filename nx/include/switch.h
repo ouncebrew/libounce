@@ -92,6 +92,7 @@ extern "C" {
 #include "switch2/kernel/svc.h"
 #include "switch2/services/vi2.h"
 #include "switch2/services/gsv.h"
+#include "switch2/services/gameshare.h"
 #include "switch2/services/viddec.h"
 #include "switch2/video/decoder.h"
 #include "switch2/memory/heap.h"
