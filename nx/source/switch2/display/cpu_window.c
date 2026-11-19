@@ -9,6 +9,7 @@
  */
 #include <string.h>
 #include "cpu_window.h"
+#include "kernel/mutex.h"
 #include "kernel/svc.h"
 #include "switch2/kernel/svc.h"
 #include "arm/counter.h"
@@ -53,6 +54,10 @@
 #define POLL_NS        1000000ull
 
 static CpuWindow g_defaultWindow;
+static Mutex g_lifetimeMutex;
+static u32 g_sharedWindows;
+static Mutex g_retirementMutex;
+static Result g_workerRetirementError;
 
 static u32 _cpuwinPitch(u32 width) {
     return (width * 4 + GOB_WIDTH_B - 1) & ~(GOB_WIDTH_B - 1);
@@ -248,15 +253,59 @@ fail_gpu:
     return rc;
 }
 
+// g_lifetimeMutex protects opening, borrowing and closing the default session.
+static CpuWindow* _cpuwinGetDefaultLocked(void) {
+    if (!g_defaultWindow.is_open && R_FAILED(cpuwinOpen(&g_defaultWindow)))
+        return NULL;
+    return &g_defaultWindow;
+}
+
+Result cpuwinOpenShared(CpuWindow* w, Vi2Layer* layer) {
+    // A process gets one GPU session. The window borrows the default window's.
+    if (!w || !layer)
+        return MAKERESULT(Module_Libnx, LibnxError_BadGfxInit);
+    mutexLock(&g_lifetimeMutex);
+    CpuWindow* base = _cpuwinGetDefaultLocked();
+    if (!base) {
+        mutexUnlock(&g_lifetimeMutex);
+        return MAKERESULT(Module_Libnx, LibnxError_BadGfxInit);
+    }
+    memset(w, 0, sizeof(*w));
+    w->sync = base->sync;
+    w->gpu = base->gpu;
+    w->slot_event = base->slot_event;
+    w->client = base->client;
+    w->as_fd = base->as_fd;
+    w->layer = layer;
+    w->is_shared = true;
+    w->is_open = true;
+    ++g_sharedWindows;
+    mutexUnlock(&g_lifetimeMutex);
+    return 0;
+}
+
 void cpuwinClose(CpuWindow* w) {
-    if (!w->is_open)
+    if (!w->is_open || w->backing)
         return;
+    if (w->is_shared) {
+        mutexLock(&g_lifetimeMutex);
+        --g_sharedWindows;
+        memset(w, 0, sizeof(*w));
+        mutexUnlock(&g_lifetimeMutex);
+        return;
+    }
     nvClose(w->as_fd);
     _cpuwinCloseGpu(w);
     memset(w, 0, sizeof(*w));
 }
 
 Result cpuwinGetImageSize(u32 width, u32 height, u64* out_size) {
+    if (!width || width > (UINT32_MAX - (GOB_WIDTH_B - 1)) / 4 ||
+        !height || height > UINT32_MAX - (BLOCK_HEIGHT - 1) || !out_size)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    const u64 expected_size = _cpuwinImageSize(width, height);
+    if (expected_size > UINT32_MAX)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     GsvImageLayout layout;
     _cpuwinMakeLayout(&layout, width, height);
     u64 size = 0;
@@ -264,7 +313,7 @@ Result cpuwinGetImageSize(u32 width, u32 height, u64* out_size) {
     if (R_FAILED(rc))
         return rc;
     // cpuwinPixelOffset writes this layout. GSV must agree on its size.
-    if (size != _cpuwinImageSize(width, height))
+    if (size != expected_size)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     *out_size = size;
     return 0;
@@ -293,48 +342,75 @@ static Result _cpuwinCreateImage(CpuWindow* w, u32 index, u64 image_size) {
     return 0;
 
 fail_image:
-    gsvDestroyImage(image->image_id);
+    w->retirement_error = gsvDestroyImage(image->image_id);
+    if (R_FAILED(w->retirement_error)) return rc;
 fail_memory:
-    gsvReleaseImageMemory(image->memory_id);
+    w->retirement_error = gsvReleaseImageMemory(image->memory_id);
 fail:
-    memset(image, 0, sizeof(*image));
+    if (R_SUCCEEDED(w->retirement_error)) memset(image, 0, sizeof(*image));
     return rc;
 }
 
-static void _cpuwinDestroyImage(CpuWindowImage* image) {
-    gsvDestroyDisplayAlias(image->image_id);
-    gsvDestroyImage(image->image_id);
-    gsvReleaseImageMemory(image->memory_id);
-    memset(image, 0, sizeof(*image));
+static Result _cpuwinReleaseImages(CpuWindow* w) {
+    for (u32 i = 0; i < w->num_images; i++) {
+        CpuWindowImage* image = &w->images[i];
+        Result rc = gsvDestroyDisplayAlias(image->image_id);
+        if (R_SUCCEEDED(rc)) rc = gsvDestroyImage(image->image_id);
+        if (R_SUCCEEDED(rc)) rc = gsvReleaseImageMemory(image->memory_id);
+        if (R_FAILED(rc)) return w->retirement_error = rc;
+        memset(image, 0, sizeof(*image));
+    }
+    w->num_images = 0;
+    return 0;
 }
 
 // Registers the backing with the worker, CPU-cached. The steps are SVC 0x80
 // prepare, then gsvGpuRegisterMemory.
 static Result _cpuwinRegisterBacking(CpuWindow* w) {
     Result rc = svcUnknown80(w->backing, w->backing_size, BACKING_PREPARE_BIT, BACKING_PREPARE_BIT);
-    if (R_FAILED(rc))
+    if (R_FAILED(rc)) {
+        w->backing = NULL;
         return rc;
+    }
     rc = gsvGpuRegisterMemory(&w->gpu, (uintptr_t)w->backing, w->backing_size, w->client, &w->range_id);
     if (R_SUCCEEDED(rc) && !w->range_id)
-        rc = MAKERESULT(Module_Libnx, LibnxError_BadInput);
-    if (R_FAILED(rc))
-        svcUnknown80(w->backing, w->backing_size, BACKING_PREPARE_BIT, 0);
+        return w->retirement_error = MAKERESULT(Module_Libnx, LibnxError_InvalidCmifOutHeader);
+    if (R_FAILED(rc)) {
+        w->retirement_error = svcUnknown80(w->backing, w->backing_size, BACKING_PREPARE_BIT, 0);
+        if (R_SUCCEEDED(w->retirement_error)) w->backing = NULL;
+    }
     return rc;
 }
 
 // The worker signals the slot event when it retires the range. Then this
 // function clears the SVC 0x80 attribute.
 static Result _cpuwinUnregisterBacking(CpuWindow* w) {
-    Result rc = gsvGpuUnregisterMemory(&w->gpu, w->range_id, WORKER_SLOT);
-    if (R_SUCCEEDED(rc))
-        rc = eventWait(&w->slot_event, WAIT_LIMIT_NS);
+    // All windows share one slot event. A late signal after an error cannot
+    // safely be identified as a later request's acknowledgement.
+    mutexLock(&g_retirementMutex);
+    Result rc = g_workerRetirementError;
+    if (R_SUCCEEDED(rc)) {
+        rc = eventClear(&w->slot_event);
+        if (R_VALUE(rc) == KERNELRESULT(InvalidState)) rc = 0; // Already unsignalled.
+        if (R_SUCCEEDED(rc)) {
+            rc = gsvGpuUnregisterMemory(&w->gpu, w->range_id, WORKER_SLOT);
+            if (R_SUCCEEDED(rc)) rc = eventWait(&w->slot_event, WAIT_LIMIT_NS);
+            g_workerRetirementError = rc;
+        }
+    }
+    mutexUnlock(&g_retirementMutex);
     if (R_SUCCEEDED(rc))
         rc = svcUnknown80(w->backing, w->backing_size, BACKING_PREPARE_BIT, 0);
+    if (R_FAILED(rc)) return w->retirement_error = rc;
+    w->backing = NULL;
+    w->backing_size = 0;
+    w->range_id = 0;
+    w->layer_unregistered = false;
     return rc;
 }
 
 Result cpuwinCreateImages(CpuWindow* w, void* backing, u64 backing_size, u32 width, u32 height, u32 num_images) {
-    if (!w->is_open || w->num_images)
+    if (!w->is_open || w->backing)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     if (!backing || ((uintptr_t)backing & (BACKING_ALIGN - 1)) || !num_images || num_images > CPUWIN_MAX_IMAGES)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
@@ -357,13 +433,9 @@ Result cpuwinCreateImages(CpuWindow* w, void* backing, u64 backing_size, u32 wid
         if (R_SUCCEEDED(rc))
             w->num_images = i + 1;
     }
-    if (R_FAILED(rc)) {
-        // No present used these images.
-        for (u32 i = 0; i < w->num_images; i++)
-            _cpuwinDestroyImage(&w->images[i]);
-        w->num_images = 0;
+    // No present used these images, so rollback skips VI2 retirement.
+    if (R_FAILED(rc) && R_SUCCEEDED(w->retirement_error) && R_SUCCEEDED(_cpuwinReleaseImages(w)))
         _cpuwinUnregisterBacking(w);
-    }
     return rc;
 }
 
@@ -372,11 +444,15 @@ Result cpuwinCreateImages(CpuWindow* w, void* backing, u64 backing_size, u32 wid
 // 2. Every image's last release.
 // 3. The images and the backing registration.
 Result cpuwinDestroyImages(CpuWindow* w) {
-    if (!w->num_images)
+    if (R_FAILED(w->retirement_error))
+        return w->retirement_error;
+    if (!w->backing)
         return 0;
-    u8 slot = 0;
-    Result rc = _cpuwinAcquireSlot(w, &slot);
-    if (R_SUCCEEDED(rc)) {
+    Result rc = 0;
+    if (w->num_images && !w->layer_unregistered) {
+        u8 slot = 0;
+        rc = _cpuwinAcquireSlot(w, &slot);
+        if (R_FAILED(rc)) return rc;
         Vi2PresentOptions options;
         vi2MakeBasicPresentOptions(&options, w->width, w->height, armGetSystemTick());
         options.flags &= ~PRESENT_IMAGE_FLAG;
@@ -385,6 +461,8 @@ Result cpuwinDestroyImages(CpuWindow* w) {
         rc = vi2UnregisterLayerImage(w->layer, slot, &options, &available, &release);
         if (R_SUCCEEDED(rc) && !_cpuwinReleaseEmpty(&release))
             rc = MAKERESULT(Module_Libnx, LibnxError_BadGfxQueueBuffer);
+        if (R_FAILED(rc)) return w->retirement_error = rc;
+        w->layer_unregistered = true;
     }
     for (u32 i = 0; i < w->num_images && R_SUCCEEDED(rc); i++)
         rc = _cpuwinWaitRelease(w, &w->images[i].release);
@@ -393,13 +471,8 @@ Result cpuwinDestroyImages(CpuWindow* w) {
     if (R_FAILED(rc))
         return rc;
 
-    for (u32 i = 0; i < w->num_images; i++)
-        _cpuwinDestroyImage(&w->images[i]);
-    w->num_images = 0;
-    rc = _cpuwinUnregisterBacking(w);
-    w->backing = NULL;
-    w->backing_size = 0;
-    return rc;
+    rc = _cpuwinReleaseImages(w);
+    return R_SUCCEEDED(rc) ? _cpuwinUnregisterBacking(w) : rc;
 }
 
 Result cpuwinWaitImage(CpuWindow* w, u32 index) {
@@ -433,21 +506,23 @@ Result cpuwinPresentImage(CpuWindow* w, u32 index) {
 }
 
 CpuWindow* cpuwinGetDefault(void) {
-    if (!g_defaultWindow.is_open && R_FAILED(cpuwinOpen(&g_defaultWindow)))
-        return NULL;
-    return &g_defaultWindow;
+    mutexLock(&g_lifetimeMutex);
+    CpuWindow* w = _cpuwinGetDefaultLocked();
+    mutexUnlock(&g_lifetimeMutex);
+    return w;
 }
 
 bool cpuwinDefaultHasImages(void) {
-    return g_defaultWindow.num_images != 0;
+    return g_defaultWindow.backing != NULL;
 }
 
 // Retires a framebuffer left open at exit first. If the display still holds
 // an image, everything stays open. Freeing memory that the display reads is
 // worse than leaking the window.
 bool cpuwinCloseDefault(void) {
-    if (R_FAILED(cpuwinDestroyImages(&g_defaultWindow)))
-        return false;
-    cpuwinClose(&g_defaultWindow);
-    return true;
+    mutexLock(&g_lifetimeMutex);
+    const bool closed = !g_sharedWindows && R_SUCCEEDED(cpuwinDestroyImages(&g_defaultWindow));
+    if (closed) cpuwinClose(&g_defaultWindow);
+    mutexUnlock(&g_lifetimeMutex);
+    return closed;
 }

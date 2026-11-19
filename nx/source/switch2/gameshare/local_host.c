@@ -53,16 +53,21 @@ static Result verifyLocalMode(GameShareLocalHost *host) {
     host->operation = "read streaming mode";
     rc = serviceDispatchOut(shim, GetStreamingMode, mode, .context = TraceContext);
     if (R_FAILED(rc)) return rc;
-    return mode == 0 ? 0 : invalidReply();
+    return mode == host->mode ? 0 : invalidReply();
 }
 
 Result gameshareLocalHostPrepare(GameShareLocalHost *host, u8 max_guests, const GameShareLocalAudio *audio) {
+    return gameshareLocalHostPrepareEx(host, max_guests, audio, 0);
+}
+
+Result gameshareLocalHostPrepareEx(GameShareLocalHost *host, u8 max_guests, const GameShareLocalAudio *audio,
+                                   u8 mode) {
     if (!host || !audio || max_guests < 1 || max_guests > GAMESHARE_LOCAL_MAX_GUESTS || !validGain(audio->speaker_volume) ||
         !validGain(audio->tv_volume) || !validGain(audio->external_volume)) return badInput();
     if (host->work || host->state != GameShareHostIdle) return MAKERESULT(Module_Libnx, LibnxError_AlreadyInitialized);
     host->operation = "query local work memory";
     u32 size = 0;
-    Result rc = gameshareLocalGetRequiredMemorySize(&host->client, max_guests, &size);
+    Result rc = gameshareLocalGetRequiredMemorySizeEx(&host->client, max_guests, mode, &size);
     if (R_FAILED(rc)) return rc;
     if (size == 0 || (size & 0xfff)) return invalidReply();
 
@@ -71,9 +76,10 @@ Result gameshareLocalHostPrepare(GameShareLocalHost *host, u8 max_guests, const 
     if (!host->work) return MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
     host->work_size = size;
     host->max_guests = max_guests;
+    host->mode = mode;
 
     Service *shim = &host->client.shim;
-    const InitRequest request = {.guest_count = max_guests};
+    const InitRequest request = {.mode = mode, .guest_count = max_guests};
     host->operation = "initialize local StreamPlay";
     rc = serviceDispatchIn(shim, Initialize, request, .context = TraceContext, .in_send_pid = true);
     if (R_FAILED(rc)) return rc;
@@ -128,7 +134,7 @@ Result gameshareLocalHostMatchmake(GameShareLocalHost *host, AccountUid uid) {
     Service *shim = &host->client.shim;
     host->operation = "register local work buffers";
     host->state = GameShareHostMatchmaking;
-    rc = gameshareRegisterLocalBuffers(shim, host->work, host->work_size, 0, host->max_guests);
+    rc = gameshareRegisterLocalBuffers(shim, host->work, host->work_size, host->mode, host->max_guests);
     if (R_FAILED(rc)) return rc;
     u8 arg[128];
     host->operation = "build local matchmaking argument";
@@ -204,5 +210,6 @@ Result gameshareLocalHostClose(GameShareLocalHost *host) {
     host->joined = 0;
     host->session_id = 0;
     host->max_guests = 0;
+    host->mode = 0;
     return rc;
 }

@@ -115,13 +115,17 @@ Result gameshareLocalOpen(GameShareLocalClient *client, GameShareLocalStage *sta
     return 0;
 }
 
-Result gameshareLocalGetRequiredMemorySize(GameShareLocalClient *client, s32 guest_count, u32 *out_size) {
+Result gameshareLocalGetRequiredMemorySizeEx(GameShareLocalClient *client, s32 guest_count, u8 mode, u32 *out_size) {
     if (!client || !out_size || guest_count < 1 || guest_count > GAMESHARE_LOCAL_MAX_GUESTS)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     if (!serviceIsActive(&client->shim))
         return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-    const MemoryRequest request = {.type = 0, .mode = 0, .guest_count = guest_count};
+    const MemoryRequest request = {.type = 0, .mode = mode, .guest_count = guest_count};
     return dispatch(&client->shim, GetMemorySize, &request, sizeof(request), out_size, sizeof(*out_size), NULL, NULL);
+}
+
+Result gameshareLocalGetRequiredMemorySize(GameShareLocalClient *client, s32 guest_count, u32 *out_size) {
+    return gameshareLocalGetRequiredMemorySizeEx(client, guest_count, 0, out_size);
 }
 
 Result gameshareLocalClose(GameShareLocalClient *client) {
