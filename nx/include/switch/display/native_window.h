@@ -64,10 +64,26 @@ NWindow* nwindowGetDefault(void);
 #include "../../switch2/services/vi2.h"
 
 /**
+ * @brief Creates a window whose VI2 layer is on a named display.
+ * @param[out] nw Output \ref NWindow structure.
+ * @param[in] display_name Name of the display, for example "player1": the display of
+ *            the first guest of a GameShare session with separate views.
+ * @note The window is like the default window: it has no buffer queue, and a producer
+ *       presents its own images to the window's layer (\ref nwindowGetVi2Layer). A
+ *       Vulkan swapchain can be created on it. \ref framebufferCreate cannot use it.
+ * @note Its size is 1280x720 until \ref nwindowSetDimensions, and it paces with its swap
+ *       interval. \ref nwindowClose closes its layer and display; stop presenting to it first.
+ * @note A process can have four such windows.
+ */
+Result nwindowCreateForDisplay(NWindow* nw, const char* display_name);
+
+/**
  * @brief Gets the VI2 layer that presents a window's images, opening it on first use.
- * @param[in] nw Window. Only the default window (\ref nwindowGetDefault) has a layer.
- * @param[out] out_layer The window's layer. The window owns it and closes it when the
- *             application exits (default display, endpoint "default", attached and selected).
+ * @param[in] nw Window: the default window (\ref nwindowGetDefault) or a window of
+ *            \ref nwindowCreateForDisplay. Other windows have no layer.
+ * @param[out] out_layer The window's layer, attached to the window's display and selected
+ *             on its endpoint "default". The window owns it. The default window closes
+ *             it when the application exits.
  * @note One producer presents to the layer at a time: the window's framebuffer or a
  *       Vulkan swapchain. Before another producer presents, the previous one unregisters
  *       the layer's image (a present without the image flag) and waits for its releases.
@@ -76,8 +92,9 @@ Result nwindowGetVi2Layer(NWindow* nw, Vi2Layer** out_layer);
 
 /**
  * @brief Gets the VI2 display that a window's layer is attached to, opening the layer on first use.
- * @param[in] nw Window. Only the default window (\ref nwindowGetDefault) has a display.
- * @param[out] out_display The window's default display, registered in the process's VI2
+ * @param[in] nw Window: the default window (\ref nwindowGetDefault) or a window of
+ *            \ref nwindowCreateForDisplay.
+ * @param[out] out_display The window's display, registered in the process's VI2
  *             session. Display events and queries (\ref vi2CreateDisplayEvent) need it.
  * @note Destroy display events created on it before \ref nwindowReleaseVi2Layer closes it.
  */
@@ -133,7 +150,8 @@ Result nwindowSetVrr(NWindow* nw, bool enable);
 
 /**
  * @brief Gets the interval to present a window's images with.
- * @param[in] nw Window. Only the default window (\ref nwindowGetDefault).
+ * @param[in] nw Window: the default window (\ref nwindowGetDefault) or a window of
+ *            \ref nwindowCreateForDisplay, which always uses its swap interval.
  * @param[out] out_numerator,out_denominator The interval in seconds, as in \ref Vi2PresentOptions.
  * @note With frame rates (\ref nwindowSetFrameRates), the interval is the rate
  *       for the display's current refresh rate. That refresh rate follows
@@ -144,8 +162,9 @@ Result nwindowSetVrr(NWindow* nw, bool enable);
 Result nwindowGetPresentInterval(NWindow* nw, u16* out_numerator, u16* out_denominator);
 
 /**
- * @brief Closes a window's VI2 layer once no producer presents to it.
- * @param[in] nw Window. Only the default window (\ref nwindowGetDefault) has a layer.
+ * @brief Closes the default window's VI2 layer once no producer presents to it.
+ * @param[in] nw Window. Only the default window (\ref nwindowGetDefault): a window of
+ *            \ref nwindowCreateForDisplay keeps its layer until \ref nwindowClose.
  * @return LibnxError_AlreadyInitialized while a framebuffer exists on the window.
  * @note The layer holds the process's GSV root. That root delegates the GPU's
  *       nvservices session only once. To open the GPU again after a shutdown

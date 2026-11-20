@@ -7,6 +7,7 @@
 #include "display/native_window.h"
 #if defined(__SWITCH2__)
 #include "../switch2/display/cpu_window.h"
+#include "../switch2/display/vi2_window.h"
 #include "../switch2/display/window_policy.h"
 #endif
 #include "nvidia/graphic_buffer.h"
@@ -112,6 +113,25 @@ Result nwindowCreateFromLayer(NWindow* nw, const ViLayer* layer)
     return nwindowCreate(nw, viGetSession_IHOSBinderDriverRelay(), layer->igbp_binder_obj_id, false);
 }
 
+#if defined(__SWITCH2__)
+// A window of nwindowCreateForDisplay also closes its layer and display. If
+// VI2 refuses that, the window stays valid and its layer open.
+void nwindowClose(NWindow* nw)
+{
+    if (!nwindowIsValid(nw))
+        return;
+    if (R_FAILED(_nwindowCloseDisplayWindow(nw)))
+        return;
+
+    if (nw->is_connected)
+        _nwindowDisconnect(nw);
+
+    eventClose(&nw->event);
+    binderClose(&nw->bq);
+
+    memset(nw, 0, sizeof(*nw));
+}
+#else
 void nwindowClose(NWindow* nw)
 {
     if (!nwindowIsValid(nw))
@@ -125,6 +145,7 @@ void nwindowClose(NWindow* nw)
 
     memset(nw, 0, sizeof(*nw));
 }
+#endif
 
 #if defined(__SWITCH2__)
 // A window with per-mode dimensions (nwindowSetModeDimensions)

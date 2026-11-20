@@ -10,17 +10,13 @@
 #if defined(__SWITCH2__)
 #include "services/applet.h"
 #include "../switch2/display/cpu_window.h"
+#include "../switch2/display/vi2_window.h"
 #include "../switch2/display/window_policy.h"
 #endif
 
 #if defined(__SWITCH2__)
 // The default window's VI2 layer, opened on first use.
-static struct {
-    bool vi2_initialized, display_open, layer_created, layer_attached, layer_selected;
-    Vi2Display display;
-    Vi2Endpoint endpoint;
-    Vi2Layer layer;
-} g_vi2Window;
+static Vi2Window g_vi2Window;
 #else
 static ViDisplay g_viDisplay;
 static ViLayer g_viLayer;
@@ -202,74 +198,31 @@ static Result _nwindowCloseRefreshEvent(void)
 // the rest open.
 static Result _nwindowCloseVi2Layer(void)
 {
-    Result rc = 0;
-    if (g_vi2Window.layer_attached) {
-        rc = vi2DetachLayer(&g_vi2Window.layer);
-        if (R_FAILED(rc))
-            return rc;
-        g_vi2Window.layer_attached = false;
-    }
-    if (g_vi2Window.layer_selected) {
-        rc = vi2ClearLayerSelection(&g_vi2Window.endpoint);
-        if (R_FAILED(rc))
-            return rc;
-        g_vi2Window.layer_selected = false;
-    }
-    if (g_vi2Window.layer_created) {
-        rc = vi2CloseLayer(&g_vi2Window.layer);
-        if (R_FAILED(rc))
-            return rc;
-        g_vi2Window.layer_created = false;
-    }
-    if (g_vi2Window.display_open) {
+    Result rc = _vi2WindowCloseLayer(&g_vi2Window);
+    if (R_SUCCEEDED(rc) && g_vi2Window.display_open)
         rc = _nwindowCloseRefreshEvent();
-        if (R_FAILED(rc))
-            return rc;
-        vi2CloseEndpoint(&g_vi2Window.endpoint);
-        rc = vi2CloseDisplay(&g_vi2Window.display);
-        if (R_FAILED(rc))
-            return rc;
-        g_vi2Window.display_open = false;
-    }
-    if (g_vi2Window.vi2_initialized) {
-        vi2Exit();
-        g_vi2Window.vi2_initialized = false;
-    }
-    return 0;
+    if (R_SUCCEEDED(rc))
+        rc = _vi2WindowCloseDisplay(&g_vi2Window);
+    return rc;
 }
 
 Result nwindowGetVi2Layer(NWindow* nw, Vi2Layer** out_layer)
 {
-    if (nw != &g_defaultWin || !out_layer)
+    if (!out_layer)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
-    if (g_vi2Window.layer_selected) {
-        *out_layer = &g_vi2Window.layer;
+
+    // A window of nwindowCreateForDisplay has its layer from its creation.
+    Vi2Window* display_window = _nwindowGetDisplayWindow(nw);
+    if (display_window) {
+        *out_layer = &display_window->layer;
         return 0;
     }
+    if (nw != &g_defaultWin)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
     Result rc = 0;
-    if (!g_vi2Window.vi2_initialized) {
-        rc = vi2Initialize();
-        g_vi2Window.vi2_initialized = R_SUCCEEDED(rc);
-    }
-    if (R_SUCCEEDED(rc) && !g_vi2Window.display_open) {
-        rc = vi2OpenDefaultDisplay(&g_vi2Window.display);
-        g_vi2Window.display_open = R_SUCCEEDED(rc);
-        if (g_vi2Window.display_open)
-            vi2CreateEndpoint(&g_vi2Window.endpoint, &g_vi2Window.display, "default");
-    }
-    if (R_SUCCEEDED(rc) && !g_vi2Window.layer_created) {
-        rc = vi2CreateLayer(&g_vi2Window.layer);
-        g_vi2Window.layer_created = R_SUCCEEDED(rc);
-    }
-    if (R_SUCCEEDED(rc) && !g_vi2Window.layer_attached) {
-        rc = vi2AttachLayer(&g_vi2Window.layer, &g_vi2Window.display);
-        g_vi2Window.layer_attached = R_SUCCEEDED(rc);
-    }
-    if (R_SUCCEEDED(rc)) {
-        rc = vi2SelectLayer(&g_vi2Window.layer, &g_vi2Window.endpoint);
-        g_vi2Window.layer_selected = R_SUCCEEDED(rc);
-    }
+    if (!g_vi2Window.layer_selected)
+        rc = _vi2WindowOpen(&g_vi2Window, NULL);
     if (R_SUCCEEDED(rc))
         *out_layer = &g_vi2Window.layer;
     return rc;
@@ -281,8 +234,10 @@ Result nwindowGetVi2Display(NWindow* nw, Vi2Display** out_display)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     Vi2Layer* layer;
     Result rc = nwindowGetVi2Layer(nw, &layer);
-    if (R_SUCCEEDED(rc))
-        *out_display = &g_vi2Window.display;
+    if (R_SUCCEEDED(rc)) {
+        Vi2Window* display_window = _nwindowGetDisplayWindow(nw);
+        *out_display = display_window ? &display_window->display : &g_vi2Window.display;
+    }
     return rc;
 }
 
@@ -351,7 +306,15 @@ Result nwindowSetVrr(NWindow* nw, bool enable)
 // must not double the rate of an application that did not ask for 120 Hz.
 Result nwindowGetPresentInterval(NWindow* nw, u16* out_numerator, u16* out_denominator)
 {
-    if (nw != &g_defaultWin || !out_numerator || !out_denominator)
+    if (!out_numerator || !out_denominator)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    // A window of nwindowCreateForDisplay paces with its swap interval.
+    if (_nwindowGetDisplayWindow(nw)) {
+        *out_numerator = (u16)nw->swap_interval;
+        *out_denominator = 60;
+        return 0;
+    }
+    if (nw != &g_defaultWin)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     mutexLock(&g_windowPolicy.mutex);
     _nwindowApplyRefreshCapabilities();
@@ -376,6 +339,7 @@ Result nwindowGetPresentInterval(NWindow* nw, u16* out_numerator, u16* out_denom
 // opens the GPU again needs a new root, so it releases the layer here first.
 Result nwindowReleaseVi2Layer(NWindow* nw)
 {
+    // A window of nwindowCreateForDisplay keeps its layer until nwindowClose.
     if (nw != &g_defaultWin)
         return MAKERESULT(Module_Libnx, LibnxError_BadInput);
     if (cpuwinDefaultHasImages())
