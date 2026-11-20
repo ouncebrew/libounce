@@ -24,6 +24,7 @@ typedef struct {
 /// A VI2 layer with the GPU state its CPU images need.
 typedef struct {
     bool is_open;
+    bool is_shared;          ///< Borrows the default window's GPU state. Do not close it.
     GsvSync sync;
     GsvGpu gpu;
     Event slot_event;
@@ -37,11 +38,17 @@ typedef struct {
     u32 width;
     u32 height;
     u32 num_images;
+    bool layer_unregistered;
+    Result retirement_error;
     CpuWindowImage images[CPUWIN_MAX_IMAGES];
 } CpuWindow;
 
 /// Opens the window: GPU state and the default window's VI2 layer.
 Result cpuwinOpen(CpuWindow* w);
+/// Opens a window that presents to a layer the caller owns, such as one on a
+/// guest's display. It shares the default window's GPU session, so the default window
+/// must stay open, and the layer must stay selected, until this window is closed.
+Result cpuwinOpenShared(CpuWindow* w, Vi2Layer* layer);
 /// Closes the window. Destroy its images first.
 void cpuwinClose(CpuWindow* w);
 
@@ -52,7 +59,8 @@ Result cpuwinGetImageSize(u32 width, u32 height, u64* out_size);
  * @brief Registers backing memory and creates display images in it.
  * @param[in] backing 0x10000-aligned heap memory holding num_images images
  *            of \ref cpuwinGetImageSize bytes each, back to back. The window
- *            uses it until \ref cpuwinDestroyImages.
+ *            uses it until \ref cpuwinDestroyImages releases it. Even after
+ *            an error, retain the allocation while w->backing still points to it.
  */
 Result cpuwinCreateImages(CpuWindow* w, void* backing, u64 backing_size, u32 width, u32 height, u32 num_images);
 /// Unregisters the layer's image, waits for every release and destroys the images and the backing registration.
@@ -71,8 +79,8 @@ void _nwindowCreateForCpuWindow(NWindow* nw);
 
 /// The default NWindow's window. It opens on first use. NULL if it cannot open.
 CpuWindow* cpuwinGetDefault(void);
-/// Whether the default window holds images (a framebuffer exists).
+/// Whether the default window still owns backing, including a failed retirement.
 bool cpuwinDefaultHasImages(void);
 /// Retires the default window's images and closes the window if it is open.
-/// Returns false if the display still holds an image. Everything then stays open.
+/// Returns false while a shared window uses it or its backing could not be retired.
 bool cpuwinCloseDefault(void);

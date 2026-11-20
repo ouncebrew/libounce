@@ -23,7 +23,7 @@ INCLUDES	:=	include external/bsd/include
 
 ifeq ($(SWITCH2),1)
 TARGET		:=	ounce
-SOURCES		+=	source/switch2/services source/switch2/kernel source/switch2/display source/switch2/video source/switch2/memory
+SOURCES		+=	source/switch2/gameshare source/switch2/services source/switch2/kernel source/switch2/display source/switch2/video source/switch2/memory
 # MALLOC=1 builds libounce_malloc.a, the mimalloc allocator, on its own;
 # the rest of the library is libounce_core.a.
 ifeq ($(MALLOC),1)

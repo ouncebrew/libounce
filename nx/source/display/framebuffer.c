@@ -107,7 +107,7 @@ Result framebufferCreate(Framebuffer* fb, NWindow *win, u32 width, u32 height, u
     CpuWindow* cw = cpuwinGetDefault();
     if (!cw)
         return MAKERESULT(Module_Libnx, LibnxError_BadGfxInit);
-    if (cw->num_images)
+    if (cw->backing)
         return MAKERESULT(Module_Libnx, LibnxError_AlreadyInitialized);
 
     u64 image_size = 0;
@@ -125,7 +125,9 @@ Result framebufferCreate(Framebuffer* fb, NWindow *win, u32 width, u32 height, u
 
     rc = cpuwinCreateImages(cw, fb->buf, buf_size, width, height, num_fbs);
     if (R_FAILED(rc)) {
-        __libnx_free(fb->buf);
+        // Rollback can fail while the worker still owns the backing.
+        if (cw->backing != fb->buf)
+            __libnx_free(fb->buf);
         fb->buf = NULL;
         return rc;
     }
