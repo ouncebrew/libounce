@@ -7,6 +7,8 @@
 #pragma once
 #include "../types.h"
 #include "../services/hid.h"
+#include "../services/hidsys.h"
+#include "../services/applet.h"
 
 /// Mask including all existing controller IDs.
 #define PAD_ANY_ID_MASK 0x1000100FFUL
@@ -250,7 +252,7 @@ typedef struct {
  */
 typedef struct {
     bool active;                ///< A Joy-Con pointer is in use on the pad's controllers.
-    bool engaged;               ///< If a Joy-Con 2 is actively being used as a mouse
+    bool engaged;               ///< If a Joy-Con 2 is actively being used as a mouse. Unused currently.
     PadPointerSide side;        ///< Which Joy-Con the pointer follows.
     s32 x;                      ///< Pointer X, from 0 to the width given to \ref padPointerInitialize minus 1.
     s32 y;                      ///< Pointer Y, from 0 to the height minus 1.
@@ -307,4 +309,12 @@ NX_CONSTEXPR u32 padPointerGetButtonsDown(const PadPointer* pointer) {
 NX_CONSTEXPR u32 padPointerGetButtonsUp(const PadPointer* pointer) {
     return pointer->buttons_old & ~pointer->buttons_cur;
 }
+
+/// @brief Uses the HID Gyroscope to detect if a Joy-Con 2 is laying flat, ready to be used for mouse mode
+///        To get a handle for this function, \ref hidGetSixAxisSensorHandles and \ref hidStartSixAxisSensor
+///        can be used. In some cases, \ref appletGetAppletResourceUserId and \ref serviceDispatchIn with the
+///        hid service session and the appletResourceUserId may be needed to get valid readings to use this function
+/// @return boolean
+bool padPointerIsBeingUsed(HidSixAxisSensorHandle masterHandle[]);
+
 #endif

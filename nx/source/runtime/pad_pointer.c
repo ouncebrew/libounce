@@ -63,7 +63,7 @@ HidSixAxisSensorState readSixAxis(HidSixAxisSensorHandle targetHandle) {
     return state;
 }
 
-bool isMouseBeingUsed(HidSixAxisSensorHandle masterHandle) {
+bool padPointerIsBeingUsed(HidSixAxisSensorHandle masterHandle[]) {
     /* Get the sensor states */
     HidSixAxisSensorState left  = readSixAxis(masterHandle[2]);
     HidSixAxisSensorState right = readSixAxis(masterHandle[3]);
