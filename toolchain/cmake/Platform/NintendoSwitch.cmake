@@ -122,6 +122,8 @@ function(ounce_create_library_nro target)
 	get_filename_component(LIBRARY_NRO_OUTPUT_DIRECTORY "${LIBRARY_NRO_OUTPUT_DIRECTORY}"
 		ABSOLUTE BASE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 
+	set_property(TARGET "${target}" PROPERTY OUNCE_NRO_DONE TRUE)
+
 	add_custom_command(TARGET "${target}" POST_BUILD
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "${LIBRARY_NRO_OUTPUT_DIRECTORY}"
 		COMMAND "${NX_ELF2NRO_EXE}" "$<TARGET_FILE:${target}>"
@@ -129,3 +131,97 @@ function(ounce_create_library_nro target)
 		VERBATIM
 	)
 endfunction()
+
+# OUNCE_AUTO_CREATE_NRO: every executable, shared library or module target
+# whose output file has the suffix .elf or .so gets a POST_BUILD elf2nro
+# step, so a project needs no per-target code.
+#   - Executable foo.elf          -> foo.nro
+#   - Shared library, OUNCE_SHARED -> its DT_SONAME file name (as
+#     ounce_create_library_nro does), or <prefix><name>.nro with NO_SONAME
+# The NRO is written next to the target's file unless the target sets
+# OUNCE_NRO_OUTPUT_DIRECTORY.
+# Per-target properties:
+#   OUNCE_NO_NRO TRUE              skip this target
+#   OUNCE_NRO_NAME <file name>     override the NRO's file name
+#   OUNCE_NRO_OUTPUT_DIRECTORY <d> override the output folder
+# add_executable and add_library are wrapped, and each target is checked at
+# the end of its directory, so properties set after the target is created
+# (SUFFIX, OUTPUT_NAME, NO_SONAME) are seen. Needs CMake 3.19
+# (cmake_language(DEFER)). Do not also call nx_create_nro or
+# ounce_create_library_nro on the same target.
+if(OUNCE_AUTO_CREATE_NRO AND NOT DKP_PLATFORM_BOOTSTRAP)
+	if(CMAKE_VERSION VERSION_LESS 3.19)
+		message(FATAL_ERROR "OUNCE_AUTO_CREATE_NRO needs CMake 3.19 or newer (cmake_language(DEFER))")
+	endif()
+
+	function(_ounce_auto_nro target)
+		message(STATUS "OUNCE_AUTO_CREATE_NRO: checking '${target}'")
+		if(NOT target OR NOT TARGET "${target}")
+			return()
+		endif()
+		get_target_property(type "${target}" TYPE)
+		if(NOT type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY)$")
+			return()
+		endif()
+		get_target_property(suffix "${target}" SUFFIX)
+		if(NOT suffix)
+			if(type STREQUAL "EXECUTABLE")
+				set(suffix "${CMAKE_EXECUTABLE_SUFFIX}")
+			else()
+				set(suffix "${CMAKE_SHARED_LIBRARY_SUFFIX}")
+			endif()
+		endif()
+		message(STATUS "OUNCE_AUTO_CREATE_NRO: ${target} type=${type} suffix='${suffix}'")
+		if(NOT suffix MATCHES "^\\.(elf|so)$")
+			return()
+		endif()
+
+		get_target_property(imported "${target}" IMPORTED)
+		get_target_property(skip "${target}" OUNCE_NO_NRO)
+		get_target_property(done "${target}" OUNCE_NRO_DONE)
+		if(imported OR skip OR done)
+			return()
+		endif()
+		if(NOT NX_ELF2NRO_EXE)
+			message(FATAL_ERROR "OUNCE_AUTO_CREATE_NRO: could not find elf2nro: install switch-tools")
+		endif()
+
+		get_target_property(nro_name "${target}" OUNCE_NRO_NAME)
+		if(NOT nro_name)
+			get_target_property(no_soname "${target}" NO_SONAME)
+			if(type STREQUAL "SHARED_LIBRARY" AND OUNCE_SHARED AND NOT no_soname)
+				set(nro_name "$<TARGET_SONAME_FILE_NAME:${target}>")
+			else()
+				set(nro_name "$<TARGET_FILE_PREFIX:${target}>$<TARGET_FILE_BASE_NAME:${target}>.nro")
+			endif()
+		endif()
+
+		get_target_property(nro_dir "${target}" OUNCE_NRO_OUTPUT_DIRECTORY)
+		if(NOT nro_dir)
+			set(nro_dir "$<TARGET_FILE_DIR:${target}>")
+		endif()
+
+		add_custom_command(TARGET "${target}" POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${nro_dir}"
+			COMMAND "${NX_ELF2NRO_EXE}" "$<TARGET_FILE:${target}>" "${nro_dir}/${nro_name}"
+			COMMENT "elf2nro ${target}"
+			VERBATIM
+		)
+		set_property(TARGET "${target}" PROPERTY OUNCE_NRO_DONE TRUE)
+	endfunction()
+
+	# EVAL expands ${name} now, so the deferred call carries the literal name.
+	function(add_executable name)
+		_add_executable(${ARGV})
+		if(NOT ";${ARGN};" MATCHES ";(ALIAS|IMPORTED);")
+			cmake_language(EVAL CODE "cmake_language(DEFER CALL _ounce_auto_nro [[${name}]])")
+		endif()
+	endfunction()
+
+	function(add_library name)
+		_add_library(${ARGV})
+		if(NOT ";${ARGN};" MATCHES ";(ALIAS|IMPORTED|INTERFACE|OBJECT|STATIC|UNKNOWN);")
+			cmake_language(EVAL CODE "cmake_language(DEFER CALL _ounce_auto_nro [[${name}]])")
+		endif()
+	endfunction()
+endif()

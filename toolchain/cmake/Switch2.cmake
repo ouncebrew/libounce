@@ -28,6 +28,7 @@
 cmake_minimum_required(VERSION 3.13)
 
 set(OUNCE_SHARED OFF CACHE BOOL "Link programs dynamically, against libounce.so, and allow shared libraries")
+set(OUNCE_AUTO_CREATE_NRO OFF CACHE BOOL "Convert every executable, shared library and module target whose output suffix is .elf or .so to an NRO with elf2nro after it is built")
 
 if(NOT CMAKE_SYSTEM_NAME)
 	set(CMAKE_SYSTEM_NAME NintendoSwitch)
