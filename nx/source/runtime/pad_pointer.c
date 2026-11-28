@@ -18,6 +18,10 @@
 // Npads that a PadState can read: No1 to No8, then Handheld.
 #define PAD_POINTER_NPAD_COUNT 9
 
+// How much leeway to give Gyroscope for the pad
+#define PAD_MOUSE_GRIP_MIN_ACCEL 0.85f
+#define PAD_MOUSE_GRIP_MAX_ACCEL 1.15f
+
 static Mutex g_padPointerMutex;
 static u32 g_padPointerUsers;
 
@@ -40,6 +44,40 @@ void padPointerExit(PadPointer* pointer) {
         hidFinalizeNmouse();
     mutexUnlock(&g_padPointerMutex);
     memset(pointer, 0, sizeof(*pointer));
+}
+
+/* This is done to ensure the Joy-Con 2 stay upright. Then only can mouse mode be reasonably used */
+HidSixAxisSensorState readSixAxis(HidSixAxisSensorHandle targetHandle) {
+    HidSixAxisSensorState state = { 0 };
+    /* Get the six axis states*/
+    hidGetSixAxisSensorStates(targetHandle, &state, 1);
+
+    /* If the state is invalid, get the states a different method */
+    if (state.acceleration.x == 0.f && state.acceleration.y == 0.f && state.acceleration.z == -1.f) {
+        u64 aruid = appletGetAppletResourceUserId();
+        serviceDispatchIn(hidsysGetServiceSession(), 500, aruid);
+
+        hidGetSixAxisSensorStates(targetHandle, &state, 1);
+    }
+
+    return state;
+}
+
+bool padPointerIsBeingUsed(HidSixAxisSensorHandle masterHandle[]) {
+    /* Get the sensor states */
+    HidSixAxisSensorState left  = readSixAxis(masterHandle[2]);
+    HidSixAxisSensorState right = readSixAxis(masterHandle[3]);
+
+    /* Get the accelerations */
+    float lx = left.acceleration.x;
+    float rx = right.acceleration.x;
+
+    /* Verify the accelerations*/
+    bool leftGrip  = lx >= PAD_MOUSE_GRIP_MIN_ACCEL && lx <= PAD_MOUSE_GRIP_MAX_ACCEL;
+    bool rightGrip = rx >= -PAD_MOUSE_GRIP_MAX_ACCEL && rx <= -PAD_MOUSE_GRIP_MIN_ACCEL;
+
+    /* Return the verified accelerations*/
+    return leftGrip || rightGrip;
 }
 
 // The Joy-Con pointers on the pad's Npads, at most PAD_POINTER_MAX_DEVICES.
